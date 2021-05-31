@@ -1,0 +1,82 @@
+version: '3'
+services:
+    php:
+        build:
+            context: .
+            dockerfile: ./Dockerfile_dev
+            args:
+                HOST_UID: 1000
+                HOST_GID: 1000
+        command: php-fpm
+        user: 1000:1000
+        depends_on:
+          - db
+        ports:
+            - 9000:9000
+        volumes:
+            - ./:/app:cached
+            # Cannot use this because of the directory rights are forced for root user
+            #- /app/var/
+        environment:
+            PHP_IDE_CONFIG: "serverName=app.localhost"
+            # Eg. in GCP environment just set this environment variable
+            # to your k8s configuration.
+            #
+            # https://symfony.com/doc/current/deployment/proxies.html
+            TRUSTED_PROXIES: "127.0.0.1,REMOTE_ADDR"
+
+    nginx:
+        build:
+            context: ./docker/nginx/
+            args:
+                HOST_UID: 1000
+                HOST_GID: 1000
+        depends_on:
+            - php
+        ports:
+            - 8000:80
+        volumes:
+            - ./:/app:cached
+            # Cannot use this because of the directory rights are forced for root user
+            #- /app/var/
+
+    db:
+        image: ${POSTGRES_DOCKER_IMAGE}
+        restart: always
+        environment:
+            POSTGRES_USER: ${POSTGRES_SUPER_USER_ROLE_NAME}
+            POSTGRES_PASSWORD: ${POSTGRES_SUPER_USER_SECRET}
+            POSTGRES_DB: ${POSTGRES_PROJECT_DATABASE_NAME}
+        volumes:
+          - db-data:/var/lib/postgresql/data
+
+    pgadmin:
+        build:
+            context: ./docker/pgadmin/
+            args:
+                - PGADMIN_DOCKER_IMAGE
+                - APP_PREFIX
+                - PGADMIN_USER_DIR
+                - POSTGRES_HOST_NAME
+                - POSTGRES_HTTP_PORT
+                - POSTGRES_PROJECT_DATABASE_NAME
+                - POSTGRES_SUPER_USER_ROLE_NAME
+                - POSTGRES_SUPER_USER_SECRET
+        restart: always
+        env_file:
+            #- ${DOCKER_GENERATED_ENV_FILE:-./docker/pgadmin/.env}
+            - ./docker/.env
+        depends_on:
+          - db
+        environment:
+          PGADMIN_LISTEN_PORT: ${PGADMIN_HTTP_PORT}
+        ports:
+            - 8080:8080
+        volumes:
+            - pgadmin-data:/var/lib/pgadmin
+        external_links:
+          - db:${POSTGRES_HOST_NAME}
+
+volumes:
+    db-data:
+    pgadmin-data:

@@ -1,0 +1,93 @@
+FROM composer:1.10.10 AS composer
+FROM php:7.4.10-fpm
+
+# Let's use bash as a default shell with login each time
+SHELL ["/bin/bash", "--login", "-c"]
+
+# Decrale used arguments from `docker-compose.yml` file
+ARG HOST_UID
+ARG HOST_GID
+
+# Update package list and install necessary libraries
+RUN apt-get update && apt-get install -y \
+    zlib1g-dev libzip-dev libxml2-dev libicu-dev g++ nano git unzip jq \
+    bash-completion iproute2 sudo libgconf-2-4 gnupg2
+
+# Add new sources
+RUN curl -sS -o - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add \
+    && echo "deb [arch=amd64]  http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list
+
+# Update package list, install stable chrome and cleanup package list
+# @see https://tecadmin.net/setup-selenium-chromedriver-on-ubuntu/
+RUN apt-get update && apt-get install -y \
+    google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/*
+
+# Fetch chromedriver, unzip, move it to proper directory and set proper rights
+RUN wget https://chromedriver.storage.googleapis.com/2.41/chromedriver_linux64.zip \
+    && unzip chromedriver_linux64.zip \
+    && mv chromedriver /usr/bin/chromedriver \
+    && chown root:root /usr/bin/chromedriver \
+    && chmod +x /usr/bin/chromedriver
+
+# Set environment variables for symfony/panther component
+# @see https://github.com/symfony/panther
+ENV PANTHER_NO_SANDBOX 1
+ENV PANTHER_CHROME_ARGUMENTS='--disable-dev-shm-usage'
+ENV PANTHER_CHROME_DRIVER_BINARY /usr/bin/chromedriver
+
+# Enable all necessary PHP packages
+RUN docker-php-ext-install -j$(nproc) zip \
+    && docker-php-ext-configure intl \
+    && docker-php-ext-install intl \
+    && docker-php-ext-install opcache \
+    && docker-php-ext-install zip \
+    && pecl install xdebug-2.9.6 \
+    && docker-php-ext-enable xdebug
+
+# Install APCu and APC backward compatibility
+RUN pecl install apcu \
+    && pecl install apcu_bc-1.0.5 \
+    && docker-php-ext-enable apcu --ini-name 10-docker-php-ext-apcu.ini \
+    && docker-php-ext-enable apc --ini-name 20-docker-php-ext-apc.ini
+
+# Copy the Composer PHAR from the Composer image into the PHP image
+COPY --from=composer /usr/bin/composer /usr/bin/composer
+
+# Copy development `php.ini` configuration to container
+COPY ./docker/php/php-dev.ini /usr/local/etc/php/php.ini
+
+# Define used work directory
+WORKDIR /app
+
+# Add everything inside docker image
+COPY . .
+
+# Ensure that all required files has execute rights
+RUN chmod +x /app/docker-entrypoint-dev.sh \
+    && chmod +x /usr/bin/composer
+
+RUN chmod -R o+s+w /usr/local/etc/php
+
+RUN groupadd --gid ${HOST_GID} dev \
+    && useradd --password dev --uid ${HOST_UID} --gid ${HOST_GID} --shell /bin/bash --create-home dev \
+    && usermod -a -G www-data,sudo dev \
+    && chgrp -hR dev /app
+
+USER dev
+
+ENV PATH "$PATH:/home/dev/.composer/vendor/bin:/app/vendor/bin:/app/bin"
+
+# Install following common tools;
+#   - bamarni/symfony-console-autocomplete, to get application commands and
+#     composer autocomplete working
+RUN composer --no-cache global require \
+    bamarni/symfony-console-autocomplete
+
+# Add necessary stuff to bash autocomplete
+RUN echo 'source /usr/share/bash-completion/bash_completion' >> /home/dev/.bashrc \
+    && echo 'eval "$(symfony-autocomplete --shell bash)"' >> /home/dev/.bashrc
+
+EXPOSE 9000
+
+ENTRYPOINT ["/app/docker-entrypoint-dev.sh"]
